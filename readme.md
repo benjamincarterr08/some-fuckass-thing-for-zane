@@ -1,3 +1,3 @@
-# test it at https://pornhub.forgecore.uk/np
+# test it at http://zane.api.forgecore.uk/np
 
 -# logs to https://discord.gg/DZcTN68nGF
