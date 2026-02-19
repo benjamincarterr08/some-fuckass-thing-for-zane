@@ -121,22 +121,22 @@ async function getMetaOverride(rawMetadata) {
   return row;
 }
 
-const COLORS = {
-  BLUE: 3447003,
-  GREEN: 3066993,
-  YELLOW: 16776960, 
-  RED: 15158332,
+const Colors = {
+  Blue: 3447003,
+  Green: 3066993,
+  Yellow: 16776960, 
+  Red: 15158332,
 };
 
 function pickEmbedColor({ isTrial, overrideApplied, spotifyAttempted, spotifyFound }) {
-  if (overrideApplied) return COLORS.YELLOW;
-  if (isTrial) return COLORS.BLUE;
+  if (overrideApplied) return Colors.Yellow;
+  if (isTrial) return Colors.Blue;
 
   if (spotifyAttempted) {
-    return spotifyFound ? COLORS.GREEN : COLORS.RED;
+    return spotifyFound ? Colors.Green : Colors.Red;
   }
 
-  return COLORS.YELLOW;
+  return Colors.Yellow;
 }
 
 async function sendNowPlayingEmbed({ artist, title, coverArt, isTrial, overrideApplied, spotifyAttempted, spotifyFound }) {
@@ -170,7 +170,7 @@ async function getLastSongFromDb() {
 }
 
 const TRIAL_NOTICE =
-  "To access main server Now Playing, use endpoint /np. This data is for the trial server.";
+  "To access main server now playing, use /np. This is the trial server.";
 
 async function handleNowPlaying({ stationId, isTrial }) {
   const az = await getJson(`http://dj.upbeat.pw/api/nowplaying/${stationId}`);
