@@ -24,7 +24,6 @@ async function getDb() {
   return pool;
 }
 
-
 async function getJson(url) {
   const { statusCode, body } = await request(url, { method: "GET" });
   const text = await body.text();
@@ -86,7 +85,21 @@ function sanitiseArtistTitle(artist, title) {
   return { artist: a, title: t };
 }
 
-const metaOverrideCache = new Map(); 
+function buildSanitiseSummary(beforeArtist, beforeTitle, afterArtist, afterTitle) {
+  const summary = [];
+
+  const bA = (beforeArtist ?? "").toString();
+  const bT = (beforeTitle ?? "").toString();
+  const aA = (afterArtist ?? "").toString();
+  const aT = (afterTitle ?? "").toString();
+
+  if (bA !== aA) summary.push({ field: "artist", before: bA, after: aA });
+  if (bT !== aT) summary.push({ field: "title", before: bT, after: aT });
+
+  return summary;
+}
+
+const metaOverrideCache = new Map();
 
 async function getMetaOverride(rawMetadata) {
   const key = (rawMetadata || "").trim();
@@ -108,14 +121,33 @@ async function getMetaOverride(rawMetadata) {
   return row;
 }
 
-async function sendNowPlayingEmbed({ artist, title, coverArt }) {
+const COLORS = {
+  BLUE: 3447003,
+  GREEN: 3066993,
+  YELLOW: 16776960, 
+  RED: 15158332,
+};
+
+function pickEmbedColor({ isTrial, overrideApplied, spotifyAttempted, spotifyFound }) {
+  if (overrideApplied) return COLORS.YELLOW;
+  if (isTrial) return COLORS.BLUE;
+
+  if (spotifyAttempted) {
+    return spotifyFound ? COLORS.GREEN : COLORS.RED;
+  }
+
+  return COLORS.YELLOW;
+}
+
+async function sendNowPlayingEmbed({ artist, title, coverArt, isTrial, overrideApplied, spotifyAttempted, spotifyFound }) {
   const webhook = process.env.webhook;
   if (!webhook) return;
 
   const embed = {
     title: "Now Playing",
     description: `Artist: ${artist}\nSong Name: ${title}`,
-    image: coverArt ? { url: coverArt } : undefined,
+    color: pickEmbedColor({ isTrial, overrideApplied, spotifyAttempted, spotifyFound }),
+    thumbnail: coverArt ? { url: coverArt } : undefined,
     timestamp: new Date().toISOString(),
   };
 
@@ -137,18 +169,25 @@ async function getLastSongFromDb() {
   return r.recordset?.[0] || null;
 }
 
-app.get("/np", async () => {
-  const az = await getJson("http://dj.upbeat.pw/api/nowplaying/1");
+const TRIAL_NOTICE =
+  "To access main server Now Playing, use endpoint /np. This data is for the trial server.";
+
+async function handleNowPlaying({ stationId, isTrial }) {
+  const az = await getJson(`http://dj.upbeat.pw/api/nowplaying/${stationId}`);
   const np = az?.now_playing;
 
   const { artist: azArtist, title: azTitle, raw } = extractArtistTitle(np);
   const rawMetadata = (raw || `${azArtist} - ${azTitle}`).trim();
 
   if ((azArtist || "").trim().toLowerCase() === "upbeat") {
-    if (lastSavedPayload) return lastSavedPayload;
+    if (lastSavedPayload) {
+      return isTrial
+        ? { message: TRIAL_NOTICE, ...lastSavedPayload }
+        : { ...lastSavedPayload };
+    }
 
     const lastDb = await getLastSongFromDb();
-    return lastDb
+    const basePayload = lastDb
       ? {
           artist: lastDb.ArtistName,
           title: lastDb.SongName,
@@ -163,6 +202,8 @@ app.get("/np", async () => {
           rawMetadata,
           source: "none",
         };
+
+    return isTrial ? { message: TRIAL_NOTICE, ...basePayload, sanitised: [] } : { ...basePayload, sanitised: [] };
   }
 
   const base = sanitiseArtistTitle(azArtist, azTitle);
@@ -170,8 +211,13 @@ app.get("/np", async () => {
   let finalTitle = base.title;
   let finalCoverArt = np?.song?.art || null;
 
+  let sanitiseSummary = buildSanitiseSummary(azArtist || "", azTitle || "", finalArtist, finalTitle);
+
   const override = await getMetaOverride(rawMetadata);
   if (override) {
+    const beforeArtist = finalArtist;
+    const beforeTitle = finalTitle;
+
     if (override.NewArtist && override.NewArtist.trim()) finalArtist = override.NewArtist.trim();
     if (override.NewName && override.NewName.trim()) finalTitle = override.NewName.trim();
     if (override.NewArtURL && override.NewArtURL.trim()) finalCoverArt = override.NewArtURL.trim();
@@ -179,14 +225,21 @@ app.get("/np", async () => {
     const san2 = sanitiseArtistTitle(finalArtist, finalTitle);
     finalArtist = san2.artist;
     finalTitle = san2.title;
+
+    sanitiseSummary = sanitiseSummary.concat(
+      buildSanitiseSummary(beforeArtist, beforeTitle, finalArtist, finalTitle)
+    );
   }
 
   let spotify = null;
+  let spotifyAttempted = false;
+
   if (!override?.NewArtURL) {
     const lookupUrl =
       `https://tools.liftuphosting.com/api/v2/lookup/song?` +
       `title=${encodeURIComponent(finalTitle)}&artist=${encodeURIComponent(finalArtist)}`;
 
+    spotifyAttempted = true;
     try {
       const s = await getJson(lookupUrl);
       if (s && s.error === false && s.found && s.result) spotify = s.result;
@@ -198,30 +251,35 @@ app.get("/np", async () => {
 
   const rawKey = rawMetadata;
   if (rawKey && lastSavedRaw === rawKey) {
-    return (
-      lastSavedPayload || {
-        artist: finalArtist,
-        title: finalTitle,
-        coverArt: finalCoverArt,
-        rawMetadata,
-        overrideApplied: Boolean(override),
-        spotifyFound: Boolean(spotify),
-        spotifyId: spotify?.spotify_id || null,
-        skippedSave: true,
-      }
-    );
+    const cached = lastSavedPayload || {
+      artist: finalArtist,
+      title: finalTitle,
+      coverArt: finalCoverArt,
+      rawMetadata,
+      overrideApplied: Boolean(override),
+      spotifyFound: Boolean(spotify),
+      spotifyId: spotify?.spotify_id || null,
+      skippedSave: true,
+      sanitised: sanitiseSummary,
+      isTrial,
+      spotifyAttempted,
+    };
+
+    return isTrial ? { message: TRIAL_NOTICE, ...cached } : cached;
   }
 
-  const db = await getDb();
-  await db
-    .request()
-    .input("SongName", sql.NVarChar(255), finalTitle)
-    .input("ArtistName", sql.NVarChar(255), finalArtist)
-    .input("AlbumArtUrl", sql.NVarChar(1024), finalCoverArt)
-    .input("RawMetadata", sql.NVarChar(sql.MAX), rawMetadata)
-    .query(
-      "INSERT INTO SongHistory (SongName, ArtistName, AlbumArtUrl, RawMetadata) VALUES (@SongName, @ArtistName, @AlbumArtUrl, @RawMetadata)"
-    );
+  if (!isTrial) {
+    const db = await getDb();
+    await db
+      .request()
+      .input("SongName", sql.NVarChar(255), finalTitle)
+      .input("ArtistName", sql.NVarChar(255), finalArtist)
+      .input("AlbumArtUrl", sql.NVarChar(1024), finalCoverArt)
+      .input("RawMetadata", sql.NVarChar(sql.MAX), rawMetadata)
+      .query(
+        "INSERT INTO SongHistory (SongName, ArtistName, AlbumArtUrl, RawMetadata) VALUES (@SongName, @ArtistName, @AlbumArtUrl, @RawMetadata)"
+      );
+  }
 
   const payload = {
     artist: finalArtist,
@@ -231,16 +289,28 @@ app.get("/np", async () => {
     overrideApplied: Boolean(override),
     spotifyFound: Boolean(spotify),
     spotifyId: spotify?.spotify_id || null,
-    saved: true,
+    saved: !isTrial,
     savedAt: Date.now(),
+    sanitised: sanitiseSummary,
+    isTrial,
+    spotifyAttempted,
   };
 
   lastSavedRaw = rawKey;
   lastSavedPayload = payload;
 
   sendNowPlayingEmbed(payload).catch(() => {});
-  return payload;
+  return isTrial ? { message: TRIAL_NOTICE, ...payload } : payload;
+}
+
+app.get("/np", async () => {
+  return handleNowPlaying({ stationId: 1, isTrial: false });
 });
+
+app.get("/", async () => {
+  return handleNowPlaying({ stationId: 2, isTrial: true });
+});
+
 const port = process.env.port || 11111;
 
 app.listen({ port, host: "0.0.0.0" }, () => {
